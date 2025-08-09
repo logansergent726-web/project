@@ -8,10 +8,16 @@ import numpy as np
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timedelta
 from loguru import logger
-import gspread
-from google.oauth2.service_account import Credentials
-from oauth2client.service_account import ServiceAccountCredentials
 import time
+import os
+
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    GSPREAD_AVAILABLE = True
+except ImportError:
+    logger.warning("gspread not installed. Google Sheets features will be disabled.")
+    GSPREAD_AVAILABLE = False
 
 from ..config import Config
 
@@ -33,6 +39,10 @@ class GoogleSheetsLogger:
         self.client = None
         self.spreadsheet = None
         self.worksheets = {}
+        
+        if not GSPREAD_AVAILABLE:
+            logger.warning("Google Sheets disabled - gspread not available")
+            return
         
         # Initialize connection
         self._initialize_connection()
@@ -68,37 +78,46 @@ class GoogleSheetsLogger:
             }
         }
         
-        # Initialize worksheets
-        self._setup_worksheets()
-        
-        logger.info("Google Sheets logger initialized successfully")
+        # Initialize worksheets only if connected
+        if self.is_connected():
+            self._setup_worksheets()
+            logger.info("Google Sheets logger initialized successfully")
     
     def _initialize_connection(self):
-        """Initialize connection to Google Sheets."""
+        """Initialize connection to Google Sheets using updated authentication."""
         try:
             if not self.credentials_file or not self.spreadsheet_id:
                 logger.warning("Google Sheets credentials or spreadsheet ID not configured")
                 return
             
-            # Define the scope
-            scope = [
-                'https://spreadsheets.google.com/feeds',
+            if not os.path.exists(self.credentials_file):
+                logger.warning(f"Credentials file not found: {self.credentials_file}")
+                return
+            
+            # Define the scope - updated scopes
+            scopes = [
+                'https://www.googleapis.com/auth/spreadsheets',
                 'https://www.googleapis.com/auth/drive'
             ]
             
-            # Load credentials
-            creds = ServiceAccountCredentials.from_json_keyfile_name(
-                self.credentials_file, scope
+            # Load credentials using the new google-auth library
+            credentials = Credentials.from_service_account_file(
+                self.credentials_file, 
+                scopes=scopes
             )
             
             # Initialize client
-            self.client = gspread.authorize(creds)
+            self.client = gspread.authorize(credentials)
             
-            # Open spreadsheet
+            # Test connection by opening spreadsheet
             self.spreadsheet = self.client.open_by_key(self.spreadsheet_id)
             
             logger.success("Connected to Google Sheets successfully")
             
+        except FileNotFoundError:
+            logger.error(f"Credentials file not found: {self.credentials_file}")
+            self.client = None
+            self.spreadsheet = None
         except Exception as e:
             logger.error(f"Failed to connect to Google Sheets: {e}")
             self.client = None
