@@ -3,7 +3,12 @@ Google Sheets automation module for logging trades and tracking P&L.
 Implements automatic trade logging, summary P&L, and win ratio tracking in separate tabs.
 """
 
-import pandas as pd
+try:
+    import pandas as pd
+    PANDAS_AVAILABLE = True
+except ImportError:
+    PANDAS_AVAILABLE = False
+
 import numpy as np
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timedelta
@@ -192,18 +197,44 @@ class GoogleSheetsLogger:
         try:
             worksheet = self.worksheets['Trade_Log']
             
-            # Prepare trade row data
+            # Prepare trade row data with proper timestamp handling
             trade_duration = None
             if trade_data.get('exit_timestamp') and trade_data.get('entry_timestamp'):
-                entry_time = pd.to_datetime(trade_data['entry_timestamp'])
-                exit_time = pd.to_datetime(trade_data['exit_timestamp'])
-                trade_duration = (exit_time - entry_time).days
+                try:
+                    if isinstance(trade_data['entry_timestamp'], datetime):
+                        entry_time = trade_data['entry_timestamp']
+                    else:
+                        entry_time = datetime.fromisoformat(str(trade_data['entry_timestamp']))
+                    
+                    if isinstance(trade_data['exit_timestamp'], datetime):
+                        exit_time = trade_data['exit_timestamp']
+                    else:
+                        exit_time = datetime.fromisoformat(str(trade_data['exit_timestamp']))
+                    
+                    trade_duration = (exit_time - entry_time).days
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Could not calculate trade duration: {e}")
+                    trade_duration = 0
             
             # Calculate PnL percentage
             pnl_percent = None
             if trade_data.get('pnl') and trade_data.get('entry_price') and trade_data.get('quantity'):
                 cost_basis = trade_data['entry_price'] * trade_data['quantity']
                 pnl_percent = (trade_data['pnl'] / cost_basis) * 100 if cost_basis > 0 else 0
+            
+            # Format timestamps safely
+            def format_timestamp(ts, fmt='%Y-%m-%d'):
+                if not ts:
+                    return ''
+                try:
+                    if isinstance(ts, datetime):
+                        return ts.strftime(fmt)
+                    elif isinstance(ts, str):
+                        return datetime.fromisoformat(ts).strftime(fmt)
+                    else:
+                        return str(ts)
+                except (ValueError, TypeError):
+                    return str(ts) if ts else ''
             
             row_data = [
                 datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -212,8 +243,8 @@ class GoogleSheetsLogger:
                 trade_data.get('quantity', 0),
                 trade_data.get('entry_price', 0),
                 trade_data.get('exit_price', 0),
-                pd.to_datetime(trade_data.get('entry_timestamp', '')).strftime('%Y-%m-%d') if trade_data.get('entry_timestamp') else '',
-                pd.to_datetime(trade_data.get('exit_timestamp', '')).strftime('%Y-%m-%d') if trade_data.get('exit_timestamp') else '',
+                format_timestamp(trade_data.get('entry_timestamp')),
+                format_timestamp(trade_data.get('exit_timestamp')),
                 trade_data.get('exit_reason', ''),
                 trade_data.get('pnl', 0),
                 pnl_percent or 0,
