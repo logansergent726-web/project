@@ -13,14 +13,37 @@ from pathlib import Path
 src_path = Path(__file__).parent / "src"
 sys.path.insert(0, str(src_path))
 
-from src.automation.trading_engine import TradingEngine
-from src.data.data_fetcher import DataFetcher
-from src.strategies.rsi_ma_strategy import RSIMACrossoverStrategy
-from src.ml.predictive_model import StockPredictiveModel
-from src.utils.sheets_logger import GoogleSheetsLogger
-from src.utils.telegram_alerts import TelegramAlertsBot
-from src.config import Config
-from loguru import logger
+# Handle missing dependencies gracefully
+try:
+    from src.automation.trading_engine import TradingEngine
+    from src.data.data_fetcher import DataFetcher
+    from src.strategies.rsi_ma_strategy import RSIMACrossoverStrategy
+    from src.ml.predictive_model import StockPredictiveModel
+    from src.config import Config
+    from loguru import logger
+    CORE_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: Core modules not available: {e}")
+    CORE_AVAILABLE = False
+
+# Try to import Google Sheets logger, fall back to mock
+try:
+    from src.utils.sheets_logger import GoogleSheetsLogger
+    SHEETS_AVAILABLE = True
+except ImportError:
+    try:
+        from src.utils.mock_sheets_logger import MockGoogleSheetsLogger as GoogleSheetsLogger
+        SHEETS_AVAILABLE = True
+        print("Note: Using mock Google Sheets logger (dependencies not installed)")
+    except ImportError:
+        SHEETS_AVAILABLE = False
+
+# Try to import Telegram bot
+try:
+    from src.utils.telegram_alerts import TelegramAlertsBot
+    TELEGRAM_AVAILABLE = True
+except ImportError:
+    TELEGRAM_AVAILABLE = False
 
 
 def setup_logging():
@@ -41,29 +64,99 @@ def run_engine():
 
 
 def run_backtest():
-    """Run strategy backtesting."""
-    logger.info("Running backtest...")
+    """Run strategy backtesting for exactly 6 months with Google Sheets integration."""
+    if not CORE_AVAILABLE:
+        print("❌ Core modules not available. Please install dependencies:")
+        print("pip install pandas numpy alpha-vantage scikit-learn matplotlib loguru")
+        return
+    
+    logger.info("Running 6-month backtest...")
     
     # Initialize components
-    data_fetcher = DataFetcher()
-    strategy = RSIMACrossoverStrategy()
+    try:
+        data_fetcher = DataFetcher()
+        strategy = RSIMACrossoverStrategy()
+    except Exception as e:
+        print(f"❌ Failed to initialize components: {e}")
+        print("Please check your configuration and dependencies.")
+        return
+    
+    # Initialize Google Sheets logger (optional)
+    sheets_logger = None
+    if SHEETS_AVAILABLE:
+        try:
+            sheets_logger = GoogleSheetsLogger()
+            if hasattr(sheets_logger, 'is_connected') and sheets_logger.is_connected():
+                logger.info("Google Sheets integration enabled for backtest logging")
+            else:
+                logger.warning("Google Sheets not configured - using mock logger for demo")
+        except Exception as e:
+            logger.warning(f"Google Sheets integration failed: {e}")
     
     # Fetch data
-    logger.info("Fetching historical data...")
-    data = data_fetcher.get_nifty50_data()
+    logger.info("Fetching historical data for 6-month backtest...")
+    try:
+        data = data_fetcher.get_nifty50_data()
+    except Exception as e:
+        print(f"❌ Failed to fetch data: {e}")
+        print("Please check your Alpha Vantage API key configuration.")
+        return
     
     if not data:
         logger.error("No data available for backtesting")
         return
     
-    # Run backtest
-    results = strategy.backtest(data)
+    # Filter data to exactly 6 months from the latest available date
+    from datetime import datetime, timedelta
     
-    # Display results
-    print("\n" + "="*50)
-    print("BACKTEST RESULTS")
-    print("="*50)
-    print(f"Period: {results.get('start_date')} to {results.get('end_date')}")
+    # Find the latest date and go back exactly 6 months
+    latest_date = None
+    six_month_data = {}
+    
+    for symbol, stock_data in data.items():
+        if not stock_data.empty:
+            stock_latest = stock_data.index.max()
+            if latest_date is None or stock_latest > latest_date:
+                latest_date = stock_latest
+    
+    if latest_date is None:
+        logger.error("No valid data found")
+        return
+    
+    # Calculate 6 months back (approximately 180 trading days)
+    start_date = latest_date - timedelta(days=180)
+    
+    logger.info(f"Backtest period: {start_date.date()} to {latest_date.date()}")
+    
+    # Filter data for each stock to 6-month period
+    for symbol, stock_data in data.items():
+        if not stock_data.empty:
+            # Filter to 6-month period
+            mask = (stock_data.index >= start_date) & (stock_data.index <= latest_date)
+            filtered_data = stock_data[mask]
+            
+            if len(filtered_data) > 0:
+                six_month_data[symbol] = filtered_data
+                logger.info(f"Filtered {symbol}: {len(filtered_data)} trading days")
+    
+    if not six_month_data:
+        logger.error("No data available for the 6-month period")
+        return
+    
+    # Run backtest with 6-month data
+    logger.info("Running strategy backtest...")
+    try:
+        results = strategy.backtest(six_month_data, start_date=start_date.strftime('%Y-%m-%d'))
+    except Exception as e:
+        print(f"❌ Backtest failed: {e}")
+        return
+    
+    # Enhanced results display
+    print("\n" + "="*60)
+    print("6-MONTH BACKTEST RESULTS")
+    print("="*60)
+    print(f"Period: {start_date.date()} to {latest_date.date()}")
+    print(f"Duration: ~6 months ({(latest_date - start_date).days} days)")
     print(f"Total Return: {results.get('total_return', 0):.2%}")
     print(f"Annualized Return: {results.get('annualized_return', 0):.2%}")
     print(f"Sharpe Ratio: {results.get('sharpe_ratio', 0):.2f}")
@@ -72,14 +165,79 @@ def run_backtest():
     print(f"Total Trades: {results.get('total_trades', 0)}")
     print(f"Winning Trades: {results.get('winning_trades', 0)}")
     print(f"Losing Trades: {results.get('losing_trades', 0)}")
-    print("="*50)
+    
+    if results.get('trades'):
+        avg_win = sum([t.pnl for t in results['trades'] if t.pnl > 0]) / max(1, results.get('winning_trades', 1))
+        avg_loss = sum([t.pnl for t in results['trades'] if t.pnl < 0]) / max(1, results.get('losing_trades', 1))
+        print(f"Average Win: ₹{avg_win:.2f}")
+        print(f"Average Loss: ₹{avg_loss:.2f}")
+        print(f"Profit Factor: {abs(avg_win/avg_loss) if avg_loss != 0 else 'N/A':.2f}")
+    
+    print("="*60)
+    
+    # Log results to Google Sheets if available
+    if sheets_logger:
+        logger.info("Logging backtest results to Google Sheets...")
+        try:
+            # Log individual trades
+            if results.get('trades'):
+                for trade in results['trades']:
+                    trade_data = {
+                        'timestamp': trade.timestamp,
+                        'symbol': trade.symbol,
+                        'action': trade.action,
+                        'quantity': trade.quantity,
+                        'entry_price': trade.price,
+                        'exit_price': trade.exit_price,
+                        'entry_date': trade.timestamp.strftime('%Y-%m-%d') if trade.timestamp else '',
+                        'exit_date': trade.exit_timestamp.strftime('%Y-%m-%d') if trade.exit_timestamp else '',
+                        'exit_reason': trade.exit_reason or 'N/A',
+                        'pnl': trade.pnl,
+                        'stop_loss': trade.stop_loss,
+                        'take_profit': trade.take_profit
+                    }
+                    sheets_logger.log_trade(trade_data)
+            
+            # Log final portfolio summary
+            portfolio_summary = {
+                'date': latest_date,
+                'total_capital': strategy.current_capital,
+                'total_pnl': strategy.current_capital - strategy.initial_capital,
+                'cumulative_return': results.get('total_return', 0),
+                'active_positions': len(strategy.positions),
+                'max_drawdown': results.get('max_drawdown', 0),
+                'win_rate': results.get('win_rate', 0)
+            }
+            sheets_logger.update_portfolio_summary(portfolio_summary)
+            
+            # Log performance metrics
+            performance_metrics = {
+                'total_return': results.get('total_return', 0),
+                'annualized_return': results.get('annualized_return', 0),
+                'sharpe_ratio': results.get('sharpe_ratio', 0),
+                'max_drawdown': results.get('max_drawdown', 0),
+                'win_rate': results.get('win_rate', 0),
+                'total_trades': results.get('total_trades', 0),
+                'winning_trades': results.get('winning_trades', 0),
+                'losing_trades': results.get('losing_trades', 0)
+            }
+            sheets_logger.update_performance_metrics(performance_metrics)
+            
+            print("\n✅ Backtest results logged to Google Sheets successfully!")
+            print("Check your Google Sheet for detailed trade logs and performance data.")
+            
+        except Exception as e:
+            logger.error(f"Failed to log to Google Sheets: {e}")
+            print(f"\n❌ Google Sheets logging failed: {e}")
     
     # Plot results
     try:
         strategy.plot_backtest_results(results, save_path="backtest_results.png")
-        print("Backtest chart saved as 'backtest_results.png'")
+        print(f"\n📊 Backtest chart saved as 'backtest_results.png'")
     except Exception as e:
         logger.warning(f"Could not generate plot: {e}")
+    
+    return results
 
 
 def train_ml_model():
